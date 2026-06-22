@@ -20,6 +20,7 @@ set -euo pipefail
 
 # --- Defaults --------------------------------------------------------------
 
+readonly VERSION="1.0.0"
 readonly DEFAULT_REGION="eu-west-3"
 readonly DEFAULT_NAMESPACE="account-regional"
 readonly NAMESPACE_SUFFIX="an"     # required trailing label for account-regional names
@@ -87,6 +88,7 @@ Output:
   --output-file <path>      Also write the result to a file (chmod 600)
   --dry-run                 Print intended actions without making any change
   --quiet                   Suppress progress logs (errors still shown)
+  -v, --version             Print the version and exit
   -h, --help                Show this help
 EOF
 }
@@ -115,6 +117,7 @@ parse_args() {
       --output-file)            OUTPUT_FILE="${2:-}"; shift 2 ;;
       --dry-run)                DRY_RUN=true; shift ;;
       --quiet)                  QUIET=true; shift ;;
+      -v|--version)             printf 'create-dokploy-s3-destination %s\n' "$VERSION"; exit 0 ;;
       -h|--help)                usage; exit 0 ;;
       *)                        err "Unknown argument: $1"; usage; exit 1 ;;
     esac

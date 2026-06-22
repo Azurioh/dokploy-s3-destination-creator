@@ -5,6 +5,9 @@
 # Quick install (latest from main):
 #   curl -fsSL https://raw.githubusercontent.com/Azurioh/dokploy-s3-destination-creator/main/install.sh | bash
 #
+# To update an existing install, run the exact same command again: it overwrites
+# the installed binary in place and reports the version change.
+#
 # Pin a version, or choose the install dir:
 #   curl -fsSL .../install.sh | VERSION=v1.0.0 bash
 #   curl -fsSL .../install.sh | INSTALL_DIR="$HOME/.local/bin" bash
@@ -36,6 +39,13 @@ resolve_install_dir() {
   fi
 }
 
+# Read the VERSION constant straight from a script file without executing it.
+extract_version() {
+  local file="$1" v
+  v="$(grep -m1 '^readonly VERSION=' "$file" 2>/dev/null | cut -d'"' -f2)"
+  printf '%s' "${v:-unknown}"
+}
+
 download() {
   local url="$1" out="$2"
   if command -v curl >/dev/null 2>&1; then
@@ -60,11 +70,14 @@ main() {
     *) err "Unsupported OS '$(uname -s)'. This tool targets Linux and macOS."; exit 1 ;;
   esac
 
-  local install_dir dest tmp
+  local install_dir dest tmp old_version new_version
   install_dir="$(resolve_install_dir)"
   dest="${install_dir}/${BIN_NAME}"
 
-  log "Installing ${BIN_NAME} (${REF}) to ${install_dir}"
+  old_version=""
+  if [[ -f "$dest" ]]; then
+    old_version="$(extract_version "$dest")"
+  fi
 
   tmp="$(mktemp)"
   # shellcheck disable=SC2064
@@ -75,6 +88,14 @@ main() {
   if [[ ! -s "$tmp" ]]; then
     err "Downloaded file is empty — check the version/ref '${REF}'."
     exit 1
+  fi
+
+  new_version="$(extract_version "$tmp")"
+
+  if [[ -n "$old_version" ]]; then
+    log "Updating ${BIN_NAME}: ${old_version} -> ${new_version} (${install_dir})"
+  else
+    log "Installing ${BIN_NAME} ${new_version} to ${install_dir}"
   fi
 
   mkdir -p "$install_dir"

@@ -88,6 +88,24 @@ chmod +x create-dokploy-s3-destination.sh
 ./create-dokploy-s3-destination.sh --help
 ```
 
+### Updating
+
+Updating is just re-installing — the new binary overwrites the old one in place.
+
+```bash
+# If you installed via the one-liner, run it again (reports old -> new version):
+curl -fsSL https://raw.githubusercontent.com/Azurioh/dokploy-s3-destination-creator/main/install.sh | bash
+
+# If you installed from a clone:
+git pull && sudo make install
+```
+
+Check your installed version at any time:
+
+```bash
+create-dokploy-s3-destination --version
+```
+
 ## Quick start
 
 ```bash
