@@ -21,6 +21,10 @@ set -euo pipefail
 # --- Defaults --------------------------------------------------------------
 
 readonly VERSION="1.0.0"
+readonly REPO="Azurioh/dokploy-s3-destination-creator"
+readonly REMOTE_SCRIPT="create-dokploy-s3-destination.sh"
+readonly UPDATE_REF="main"             # branch/tag the update check compares against
+readonly UPDATE_TIMEOUT=3              # seconds before the update check gives up
 readonly DEFAULT_REGION="eu-west-3"
 readonly DEFAULT_NAMESPACE="account-regional"
 readonly NAMESPACE_SUFFIX="an"     # required trailing label for account-regional names
@@ -46,6 +50,7 @@ OUTPUT="$DEFAULT_OUTPUT"           # text | env | json
 OUTPUT_FILE=""
 DRY_RUN=false
 QUIET=false
+NO_UPDATE_CHECK=false
 
 # --- Logging ---------------------------------------------------------------
 
@@ -88,8 +93,12 @@ Output:
   --output-file <path>      Also write the result to a file (chmod 600)
   --dry-run                 Print intended actions without making any change
   --quiet                   Suppress progress logs (errors still shown)
+  --no-update-check         Do not check for a newer version on startup
   -v, --version             Print the version and exit
   -h, --help                Show this help
+
+The startup update check is skipped automatically with --quiet, --dry-run, or
+when DOKPLOY_S3_NO_UPDATE_CHECK is set. It never blocks on errors or offline use.
 EOF
 }
 
@@ -117,6 +126,7 @@ parse_args() {
       --output-file)            OUTPUT_FILE="${2:-}"; shift 2 ;;
       --dry-run)                DRY_RUN=true; shift ;;
       --quiet)                  QUIET=true; shift ;;
+      --no-update-check)        NO_UPDATE_CHECK=true; shift ;;
       -v|--version)             printf 'create-dokploy-s3-destination %s\n' "$VERSION"; exit 0 ;;
       -h|--help)                usage; exit 0 ;;
       *)                        err "Unknown argument: $1"; usage; exit 1 ;;
@@ -186,6 +196,100 @@ require_aws() {
 
 # Wrapper so every call carries the chosen profile.
 awsx() { aws --profile "$PROFILE" "$@"; }
+
+# --- Update check ----------------------------------------------------------
+
+# Return 0 if dotted-numeric version $1 is strictly greater than $2.
+version_gt() {
+  local a="$1" b="$2"
+  if [[ "$a" == "$b" ]]; then
+    return 1
+  fi
+  local IFS=.
+  local -a ra rb
+  read -ra ra <<<"$a"
+  read -ra rb <<<"$b"
+  local i max="${#ra[@]}"
+  if (( ${#rb[@]} > max )); then
+    max="${#rb[@]}"
+  fi
+  for (( i = 0; i < max; i++ )); do
+    local x="${ra[i]:-0}" y="${rb[i]:-0}"
+    x="${x%%[^0-9]*}"; x="${x:-0}"
+    y="${y%%[^0-9]*}"; y="${y:-0}"
+    if (( 10#$x > 10#$y )); then
+      return 0
+    fi
+    if (( 10#$x < 10#$y )); then
+      return 1
+    fi
+  done
+  return 1
+}
+
+# Fetch the VERSION constant from the remote script. Best-effort: prints the
+# version on success, nothing on any failure (offline, no downloader, timeout).
+fetch_remote_version() {
+  local url="https://raw.githubusercontent.com/${REPO}/${UPDATE_REF}/${REMOTE_SCRIPT}"
+  local body=""
+  if command -v curl >/dev/null 2>&1; then
+    body=$(curl -fsSL --max-time "$UPDATE_TIMEOUT" "$url" 2>/dev/null) || return 0
+  elif command -v wget >/dev/null 2>&1; then
+    body=$(wget -qO- --timeout="$UPDATE_TIMEOUT" "$url" 2>/dev/null) || return 0
+  else
+    return 0
+  fi
+  grep -m1 '^readonly VERSION=' <<<"$body" | cut -d'"' -f2
+}
+
+run_self_update() {
+  local target="$1"
+  local url="https://raw.githubusercontent.com/${REPO}/${UPDATE_REF}/install.sh"
+  log "Updating to ${target}..."
+  if command -v curl >/dev/null 2>&1; then
+    if curl -fsSL "$url" | bash; then
+      ok "Updated to ${target}. Re-run the command to use the new version."
+      exit 0
+    fi
+  elif command -v wget >/dev/null 2>&1; then
+    if wget -qO- "$url" | bash; then
+      ok "Updated to ${target}. Re-run the command to use the new version."
+      exit 0
+    fi
+  fi
+  err "Update failed. Continuing with the current version ${VERSION}."
+}
+
+maybe_check_update() {
+  if [[ "$NO_UPDATE_CHECK" == true || "$QUIET" == true || "$DRY_RUN" == true ]]; then
+    return 0
+  fi
+  if [[ -n "${DOKPLOY_S3_NO_UPDATE_CHECK:-}" ]]; then
+    return 0
+  fi
+
+  local remote
+  remote=$(fetch_remote_version)
+  if [[ -z "$remote" ]] || ! version_gt "$remote" "$VERSION"; then
+    return 0
+  fi
+
+  warn "A new version is available: ${VERSION} -> ${remote}"
+
+  # Only prompt when attached to a terminal; otherwise just hint and move on.
+  if [[ ! -t 0 || ! -t 1 ]]; then
+    warn "Update with: curl -fsSL https://raw.githubusercontent.com/${REPO}/${UPDATE_REF}/install.sh | bash"
+    return 0
+  fi
+
+  local reply=""
+  printf 'Install the update now? [y/N] ' >&2
+  read -r reply || return 0
+  case "$reply" in
+    y|Y|yes|YES) run_self_update "$remote" ;;
+    *)           log "Skipping update." ;;
+  esac
+}
 
 # --- Tag parsing -----------------------------------------------------------
 # Fills IAM_TAG_ARGS (array, "Key=k,Value=v") and BUCKET_TAGGING ("TagSet=[...]").
@@ -574,6 +678,7 @@ EOF
 main() {
   parse_args "$@"
   validate_args
+  maybe_check_update
   require_aws
   build_tags
 

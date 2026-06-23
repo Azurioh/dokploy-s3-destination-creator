@@ -90,7 +90,22 @@ chmod +x create-dokploy-s3-destination.sh
 
 ### Updating
 
-Updating is just re-installing — the new binary overwrites the old one in place.
+On startup the tool checks whether a newer version exists and, when run
+interactively, offers to install it for you:
+
+```
+[!] A new version is available: 1.0.0 -> 1.1.0
+Install the update now? [y/N]
+```
+
+Answering `y` runs the installer and exits so you can re-run with the new
+version. The check is best-effort — it never blocks the tool when you are
+offline — and is **skipped automatically** with `--quiet`, `--dry-run`, in
+non-interactive shells (it just prints a hint instead of prompting), or when
+`DOKPLOY_S3_NO_UPDATE_CHECK` is set. Disable it per-run with `--no-update-check`.
+
+You can also update manually at any time — re-installing overwrites the old
+binary in place.
 
 ```bash
 # If you installed via the one-liner, run it again (reports old -> new version):
@@ -154,6 +169,8 @@ Output:
 | `--output-file <path>` | — | Also write the result to a file (`chmod 600`). |
 | `--dry-run` | — | Print intended actions without making any change. |
 | `--quiet` | — | Suppress progress logs (errors are still shown). |
+| `--no-update-check` | — | Skip the startup check for a newer version. |
+| `-v`, `--version` | — | Print the version and exit. |
 | `-h`, `--help` | — | Show usage. |
 
 ### Examples
