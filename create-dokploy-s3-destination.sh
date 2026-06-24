@@ -735,4 +735,7 @@ main() {
   fi
 }
 
-main "$@"
+# Only run when executed directly, not when sourced (e.g. by the test suite).
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi
