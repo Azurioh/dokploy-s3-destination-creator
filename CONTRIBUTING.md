@@ -30,7 +30,9 @@ You only need a few tools:
 | --- | --- |
 | [`bash`](https://www.gnu.org/software/bash/) ≥ 4 | Runtime. |
 | [`shellcheck`](https://www.shellcheck.net/) | Static analysis — **required** to pass before merge. |
+| [`bats-core`](https://github.com/bats-core/bats-core) | Test runner for the `tests/` suite — **required** to pass before merge. |
 | [AWS CLI v2](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) | Only needed for live (non-dry-run) testing. |
+| [`curl`](https://curl.se/) + [`jq`](https://jqlang.github.io/jq/) | Only needed for the Dokploy registration path (`--register-dokploy` / `configure`). |
 
 ```bash
 git clone https://github.com/Azurioh/dokploy-s3-destination-creator.git
@@ -60,7 +62,7 @@ The script follows a consistent style — please match it.
 - **Logging.** Use the existing `log` / `ok` / `warn` / `err` helpers (they respect `--quiet` and write to stderr). Never `echo` progress to stdout — stdout is reserved for the final machine-readable result.
 - **Fail loudly, clearly.** On AWS errors, surface the captured output and exit non-zero. Where a failure is recoverable (e.g. resource already exists), warn and continue.
 - **Comments explain *why*, not *what*.** Only comment non-obvious intent.
-- **Keep it dependency-free.** Parse AWS output with `--query`/`--output`; do not introduce `jq` or other runtime dependencies.
+- **Keep the default path dependency-free.** The AWS-only provisioning path must rely on the AWS CLI alone — parse AWS output with `--query`/`--output`, no `jq`. Extra dependencies (`curl`, `jq`) are allowed **only** on the opt-in Dokploy registration path and must be guarded by a preflight check so the default path keeps working without them.
 
 ## Testing your changes
 
@@ -69,8 +71,18 @@ Every change must pass ShellCheck and, where it touches behavior, be exercised i
 **1. Lint:**
 
 ```bash
-shellcheck create-dokploy-s3-destination.sh
+make lint        # shellcheck create-dokploy-s3-destination.sh
 ```
+
+**1b. Run the test suite** (bats — offline, no AWS or Dokploy needed):
+
+```bash
+make test        # runs bats tests/
+```
+
+New behavior should come with a bats test under `tests/`. Tests source the script (its
+`main` is guarded so sourcing does not execute it) and call functions directly, or run the
+script as a subprocess. See `tests/helpers.bash` for shared helpers.
 
 **2. Validate argument handling (no AWS needed):**
 

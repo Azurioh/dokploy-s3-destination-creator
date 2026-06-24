@@ -107,6 +107,12 @@ main() {
     warn "  https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
   fi
 
+  # curl + jq are optional: needed only for the Dokploy registration path
+  # (--register-dokploy / configure), not for plain provisioning.
+  if ! command -v curl >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+    log "Optional: install 'curl' and 'jq' to use --register-dokploy / configure (Dokploy API)."
+  fi
+
   if ! command -v "$BIN_NAME" >/dev/null 2>&1; then
     warn "$install_dir is not on your PATH. Add it to your shell config:"
     warn "  export PATH=\"$install_dir:\$PATH\""
