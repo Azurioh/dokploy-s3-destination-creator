@@ -32,6 +32,7 @@ readonly DEFAULT_ENCRYPTION="AES256"
 readonly DEFAULT_OUTPUT="text"
 
 # Dokploy registration (opt-in) constants.
+readonly DOKPLOY_PROVIDER="AWS"        # rclone --s3-provider value Dokploy expects for AWS S3
 readonly DOKPLOY_HTTP_TIMEOUT=15       # seconds per Dokploy API call
 readonly DEFAULT_DOKPLOY_PROFILE="default"
 
@@ -63,6 +64,9 @@ NO_UPDATE_CHECK=false
 OPT_DOKPLOY_URL=""
 OPT_DOKPLOY_API_KEY=""
 DOKPLOY_PROFILE_NAME="$DEFAULT_DOKPLOY_PROFILE"
+REGISTER_DOKPLOY=false
+DOKPLOY_SERVER_ID=""
+DESTINATION_NAME=""
 
 # --- Logging ---------------------------------------------------------------
 
@@ -73,11 +77,15 @@ err()  { printf '\033[0;31m[-]\033[0m %s\n' "$*" >&2; }
 
 usage() {
   cat >&2 <<EOF
-Create an S3 bucket + scoped IAM user and emit Dokploy S3 destination settings.
+Create an S3 bucket + scoped IAM user and emit (or register) Dokploy S3 destination settings.
 
-Usage: $0 --stage <stage> --prefix <prefix> --profile <aws-profile> [options]
+Usage:
+  $0 [create] --stage <stage> --prefix <prefix> --profile <aws-profile> [options]
+  $0 configure [--dokploy-profile <name>]    # store a Dokploy connection profile
 
-Required:
+('create' is the default when no subcommand is given.)
+
+Required (create):
   --stage <name>            Deployment stage (e.g. prod, staging, dev)
   --prefix <name>           Bucket name prefix (e.g. passbolt-backups)
   --profile <name>          AWS CLI profile to use
@@ -109,6 +117,19 @@ Output:
   -v, --version             Print the version and exit
   -h, --help                Show this help
 
+Dokploy registration (opt-in; needs curl + jq):
+  --register-dokploy        After provisioning, register the bucket as a Dokploy
+                            S3 destination (verifies the connection first).
+  --dokploy-url <url>       Dokploy base URL (e.g. https://dokploy.example.com).
+  --dokploy-profile <name>  Stored connection profile to use (default: ${DEFAULT_DOKPLOY_PROFILE}).
+  --dokploy-api-key <key>   API key (discouraged: visible in the process list;
+                            prefer 'configure' or the DOKPLOY_API_KEY env var).
+  --server-id <id>          Dokploy server id (required by Dokploy Cloud).
+  --destination-name <name> Destination name in Dokploy (default: the bucket name).
+
+Connection settings resolve as: flag > env (DOKPLOY_URL / DOKPLOY_API_KEY) >
+selected profile > '${DEFAULT_DOKPLOY_PROFILE}' profile. Store a profile with '$0 configure'.
+
 The startup update check is skipped automatically with --quiet, --dry-run, or
 when DOKPLOY_S3_NO_UPDATE_CHECK is set. It never blocks on errors or offline use.
 EOF
@@ -139,6 +160,16 @@ parse_args() {
       --dry-run)                DRY_RUN=true; shift ;;
       --quiet)                  QUIET=true; shift ;;
       --no-update-check)        NO_UPDATE_CHECK=true; shift ;;
+      --register-dokploy)       REGISTER_DOKPLOY=true; shift ;;
+      --dokploy-url)            OPT_DOKPLOY_URL="${2:-}"; shift 2 ;;
+      --dokploy-profile)        DOKPLOY_PROFILE_NAME="${2:-}"; shift 2 ;;
+      --server-id)              DOKPLOY_SERVER_ID="${2:-}"; shift 2 ;;
+      --destination-name)       DESTINATION_NAME="${2:-}"; shift 2 ;;
+      --dokploy-api-key)
+        OPT_DOKPLOY_API_KEY="${2:-}"
+        warn "--dokploy-api-key is visible in the process list; prefer 'configure' or the DOKPLOY_API_KEY env var."
+        shift 2
+        ;;
       -v|--version)             printf 'create-dokploy-s3-destination %s\n' "$VERSION"; exit 0 ;;
       -h|--help)                usage; exit 0 ;;
       *)                        err "Unknown argument: $1"; usage; exit 1 ;;
@@ -848,6 +879,115 @@ dokploy_api() {
   printf '%s\n%s' "$status_code" "$response_body"
 }
 
+# --- Dokploy: registration -------------------------------------------------
+
+# Build the JSON body for destination.create / destination.testConnection.
+# Args: name accessKey secretKey bucket region endpoint
+# jq does the escaping. additionalFlags is omitted (server default []);
+# serverId is included only when set.
+build_dokploy_body() {
+  local name="$1" access_key="$2" secret_key="$3" bucket="$4" region="$5" endpoint="$6"
+  # shellcheck disable=SC2016  # $name etc. are jq variables, not shell expansions
+  local filter='{name:$name, provider:$provider, accessKey:$accessKey, secretAccessKey:$secretAccessKey, bucket:$bucket, region:$region, endpoint:$endpoint}'
+  local jq_args=(
+    --arg name "$name"
+    --arg provider "$DOKPLOY_PROVIDER"
+    --arg accessKey "$access_key"
+    --arg secretAccessKey "$secret_key"
+    --arg bucket "$bucket"
+    --arg region "$region"
+    --arg endpoint "$endpoint"
+  )
+  if [[ -n "$DOKPLOY_SERVER_ID" ]]; then
+    jq_args+=(--arg serverId "$DOKPLOY_SERVER_ID")
+    filter="${filter} + {serverId:\$serverId}"
+  fi
+  jq -n "${jq_args[@]}" "$filter"
+}
+
+# Best-effort human message from a Dokploy/tRPC error body.
+dokploy_error_message() {
+  local body="$1" msg
+  msg="$(printf '%s' "$body" | jq -r '[.. | .message? // empty] | first // empty' 2>/dev/null)"
+  if [[ -n "$msg" ]]; then
+    printf '%s' "$msg"
+  else
+    printf '%s' "$body"
+  fi
+}
+
+# Abort with a helpful message for a failed Dokploy call.
+dokploy_fail() {
+  local action="$1" status="$2" body="$3"
+  if [[ "$status" == "000" ]]; then
+    err "Could not reach Dokploy at ${DOKPLOY_URL%/} ($action: connection failed or timed out)."
+  else
+    err "Dokploy $action failed (HTTP $status): $(dokploy_error_message "$body")"
+  fi
+  exit 1
+}
+
+# Verify the credentials reach the bucket (rclone ls under the hood). Aborts on
+# failure so we never create a destination that does not work.
+dokploy_test_connection() {
+  local body="$1" resp status rbody
+  resp="$(dokploy_api POST destination.testConnection "$body")"
+  status="${resp%%$'\n'*}"
+  rbody="${resp#*$'\n'}"
+  if [[ "$status" == "200" || "$status" == "201" ]]; then
+    return 0
+  fi
+  if [[ "$status" == "404" && "$rbody" == *"Server not found"* ]]; then
+    err "Dokploy connection test failed: server not found. On Dokploy Cloud you must pass --server-id <id>."
+    exit 1
+  fi
+  dokploy_fail "connection test" "$status" "$rbody"
+}
+
+# Create the destination in Dokploy.
+dokploy_create() {
+  local body="$1" resp status rbody
+  resp="$(dokploy_api POST destination.create "$body")"
+  status="${resp%%$'\n'*}"
+  rbody="${resp#*$'\n'}"
+  if [[ "$status" == "200" || "$status" == "201" ]]; then
+    return 0
+  fi
+  dokploy_fail "destination create" "$status" "$rbody"
+}
+
+# Orchestrate registration: preflight, resolve config, verify, then create.
+# Args: bucket region endpoint accessKey secretKey
+register_dokploy_destination() {
+  local bucket="$1" region="$2" endpoint="$3" access_key="$4" secret_key="$5"
+
+  require_dokploy_tools
+  if ! validate_profile_name "$DOKPLOY_PROFILE_NAME"; then
+    exit 1
+  fi
+  resolve_dokploy_config
+  if [[ -z "$DOKPLOY_URL" || -z "$DOKPLOY_API_KEY" ]]; then
+    err "Dokploy URL and API key are not configured. Run '$0 configure', pass --dokploy-url, or set DOKPLOY_URL / DOKPLOY_API_KEY."
+    exit 1
+  fi
+  warn_if_insecure_url "$DOKPLOY_URL"
+
+  local name="${DESTINATION_NAME:-$bucket}"
+  local body
+  body="$(build_dokploy_body "$name" "$access_key" "$secret_key" "$bucket" "$region" "$endpoint")"
+
+  if [[ "$DRY_RUN" == true ]]; then
+    log "Dry-run: would register Dokploy destination '$name' at ${DOKPLOY_URL%/} (no API call made)."
+    return 0
+  fi
+
+  log "Verifying Dokploy can reach the bucket..."
+  dokploy_test_connection "$body"
+  log "Registering Dokploy destination '$name'..."
+  dokploy_create "$body"
+  ok "Dokploy destination '$name' registered."
+}
+
 # --- Subcommands -----------------------------------------------------------
 
 cmd_create() {
@@ -903,6 +1043,12 @@ cmd_create() {
     printf '%s\n' "$rendered" > "$OUTPUT_FILE"
     umask "$prev_umask"
     ok "Result written to $OUTPUT_FILE (mode 600)"
+  fi
+
+  # Register in Dokploy after the credentials are shown, so a registration
+  # failure never loses the provisioned credentials.
+  if [[ "$REGISTER_DOKPLOY" == true ]]; then
+    register_dokploy_destination "$bucket" "$REGION" "$endpoint" "$access_key" "$secret_key"
   fi
 
   if [[ "$DRY_RUN" != true ]]; then
