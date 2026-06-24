@@ -74,3 +74,23 @@ EOF
   [ "$status" -eq 0 ]
   [ "$output" = "https://default.example.com|tok-default" ]
 }
+
+@test "resolve: a url-only selected profile takes its key from the default profile" {
+  write_profile sel "https://sel.example.com" ""
+  write_profile default "https://default.example.com" "def-key"
+  run bash -c "source '$SCRIPT'; unset DOKPLOY_URL DOKPLOY_API_KEY; DOKPLOY_PROFILE_NAME=sel; resolve_dokploy_config; printf '%s|%s' \"\$DOKPLOY_URL\" \"\$DOKPLOY_API_KEY\""
+  [ "$status" -eq 0 ]
+  [ "$output" = "https://sel.example.com|def-key" ]
+}
+
+@test "DOKPLOY_PROFILE env sets the default selected profile name" {
+  DOKPLOY_PROFILE=staging run bash -c "source '$SCRIPT'; printf '%s' \"\$DOKPLOY_PROFILE_NAME\""
+  [ "$status" -eq 0 ]
+  [ "$output" = "staging" ]
+}
+
+@test "DOKPLOY_PROFILE_NAME defaults to 'default' without the env var" {
+  run bash -c "unset DOKPLOY_PROFILE; source '$SCRIPT'; printf '%s' \"\$DOKPLOY_PROFILE_NAME\""
+  [ "$status" -eq 0 ]
+  [ "$output" = "default" ]
+}

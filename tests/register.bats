@@ -58,3 +58,27 @@ EOF
   assert_contains "$output" "not configured"
   teardown_config_home
 }
+
+@test "register never puts the secret or API key on the curl command line" {
+  run bash -c "source '$SCRIPT'; DOKPLOY_URL=http://localhost:3000; DOKPLOY_API_KEY=apikey-distinct-zzz; register_dokploy_destination my-bucket eu-west-3 https://s3.eu-west-3.amazonaws.com AKIA secret-distinct-yyy"
+  [ "$status" -eq 0 ]
+  assert_not_contains "$(cat "$CURL_LOG")" "secret-distinct-yyy"
+  assert_not_contains "$(cat "$CURL_LOG")" "apikey-distinct-zzz"
+}
+
+@test "register redacts a secret echoed back in a Dokploy error message" {
+  cat >"$STUBDIR/curl" <<'EOF'
+#!/usr/bin/env bash
+args="$*"
+case "$args" in
+  *destination.all*)            printf '[]\n200' ;;
+  *destination.testConnection*) printf '{"message":"failed: rclone ls --s3-secret-access-key=\"leaked-secret-xyz\" :s3:b"}\n400' ;;
+  *)                            printf '{}\n200' ;;
+esac
+EOF
+  chmod +x "$STUBDIR/curl"
+  run bash -c "source '$SCRIPT'; DOKPLOY_URL=http://localhost:3000; DOKPLOY_API_KEY=K; register_dokploy_destination my-bucket eu-west-3 https://s3.eu-west-3.amazonaws.com AKIA leaked-secret-xyz"
+  [ "$status" -ne 0 ]
+  assert_not_contains "$output" "leaked-secret-xyz"
+  assert_contains "$output" "REDACTED"
+}

@@ -63,7 +63,7 @@ NO_UPDATE_CHECK=false
 # applying precedence. OPT_* hold CLI-flag overrides (highest precedence).
 OPT_DOKPLOY_URL=""
 OPT_DOKPLOY_API_KEY=""
-DOKPLOY_PROFILE_NAME="$DEFAULT_DOKPLOY_PROFILE"
+DOKPLOY_PROFILE_NAME="${DOKPLOY_PROFILE:-$DEFAULT_DOKPLOY_PROFILE}"  # --dokploy-profile overrides
 REGISTER_DOKPLOY=false
 DOKPLOY_SERVER_ID=""
 DESTINATION_NAME=""
@@ -771,8 +771,11 @@ read_profile() {
     "$(_profile_value "$path" DOKPLOY_API_KEY)"
 }
 
-# Given a profile and the current url/key, fill any empty value from the
-# profile. Echoes "<url>\n<key>". (No namerefs: must run on bash 3.2.)
+# Fill any empty url/key from a profile. Returns the result via the globals
+# _MERGED_URL / _MERGED_KEY. Using globals (rather than echoing "url\n key")
+# avoids a corruption bug: command substitution strips a trailing newline, so a
+# joined value whose key is empty loses its separator and the split mis-assigns.
+# (No namerefs either: must run on bash 3.2.)
 _merge_profile_into() {
   local profile="$1" url="$2" key="$3"
   local data
@@ -780,7 +783,6 @@ _merge_profile_into() {
   local purl pkey
   purl="${data%%$'\n'*}"
   pkey="${data#*$'\n'}"
-  pkey="${pkey%%$'\n'*}"
   if [[ "$pkey" == "$data" ]]; then
     pkey=""
   fi
@@ -790,7 +792,8 @@ _merge_profile_into() {
   if [[ -z "$key" ]]; then
     key="$pkey"
   fi
-  printf '%s\n%s' "$url" "$key"
+  _MERGED_URL="$url"
+  _MERGED_KEY="$key"
 }
 
 # Resolve DOKPLOY_URL and DOKPLOY_API_KEY using precedence:
@@ -806,16 +809,14 @@ resolve_dokploy_config() {
   fi
 
   if [[ -z "$url" || -z "$key" ]]; then
-    local merged
-    merged="$(_merge_profile_into "$DOKPLOY_PROFILE_NAME" "$url" "$key")"
-    url="${merged%%$'\n'*}"
-    key="${merged#*$'\n'}"
+    _merge_profile_into "$DOKPLOY_PROFILE_NAME" "$url" "$key"
+    url="$_MERGED_URL"
+    key="$_MERGED_KEY"
   fi
   if [[ ( -z "$url" || -z "$key" ) && "$DOKPLOY_PROFILE_NAME" != "$DEFAULT_DOKPLOY_PROFILE" ]]; then
-    local merged
-    merged="$(_merge_profile_into "$DEFAULT_DOKPLOY_PROFILE" "$url" "$key")"
-    url="${merged%%$'\n'*}"
-    key="${merged#*$'\n'}"
+    _merge_profile_into "$DEFAULT_DOKPLOY_PROFILE" "$url" "$key"
+    url="$_MERGED_URL"
+    key="$_MERGED_KEY"
   fi
 
   DOKPLOY_URL="$url"
@@ -854,29 +855,48 @@ warn_if_insecure_url() {
   esac
 }
 
-# Perform a Dokploy API call. Echoes "<http_status>\n<body>"; a transport
-# failure (e.g. host unreachable) yields status 000. Reads the resolved
-# DOKPLOY_URL / DOKPLOY_API_KEY.
+# Perform a Dokploy API call. Echoes the raw "<body>\n<http_status>" (the body
+# may itself contain newlines; the status is always the last line). A transport
+# failure (e.g. host unreachable) yields "\n000". The API key and request body
+# are passed via mode-600 temp files, never on the command line, so they cannot
+# be read from the process list. Reads the resolved DOKPLOY_URL / DOKPLOY_API_KEY.
 dokploy_api() {
   local method="$1" route="$2" body="${3:-}"
   local url="${DOKPLOY_URL%/}/api/${route}"
+
+  local cfg
+  cfg="$(mktemp)"
+  chmod 600 "$cfg"
+  printf 'header = "x-api-key: %s"\n' "$DOKPLOY_API_KEY" > "$cfg"
+
   local curl_args=(
     --silent --show-error --max-time "$DOKPLOY_HTTP_TIMEOUT"
-    -H "x-api-key: ${DOKPLOY_API_KEY}"
+    --config "$cfg"
     -X "$method"
     -o - -w $'\n%{http_code}'
   )
+  local bodyfile=""
   if [[ -n "$body" ]]; then
-    curl_args+=(-H "Content-Type: application/json" --data "$body")
+    bodyfile="$(mktemp)"
+    chmod 600 "$bodyfile"
+    printf '%s' "$body" > "$bodyfile"
+    curl_args+=(-H "Content-Type: application/json" --data-binary "@$bodyfile")
   fi
-  local response
+
+  local response failed=false
   if ! response="$(curl "${curl_args[@]}" "$url" 2>/dev/null)"; then
-    printf '000\n'
+    failed=true
+  fi
+  rm -f "$cfg"
+  if [[ -n "$bodyfile" ]]; then
+    rm -f "$bodyfile"
+  fi
+
+  if [[ "$failed" == true ]]; then
+    printf '\n000'
     return 0
   fi
-  local status_code="${response##*$'\n'}"
-  local response_body="${response%$'\n'*}"
-  printf '%s\n%s' "$status_code" "$response_body"
+  printf '%s' "$response"
 }
 
 # --- Dokploy: registration -------------------------------------------------
@@ -905,15 +925,18 @@ build_dokploy_body() {
   jq -n "${jq_args[@]}" "$filter"
 }
 
-# Best-effort human message from a Dokploy/tRPC error body.
+# Best-effort human message from a Dokploy/tRPC error body. Dokploy's
+# connection-test errors can echo the underlying rclone command (which carries
+# the secret), so redact known secret-bearing fields before returning.
 dokploy_error_message() {
   local body="$1" msg
   msg="$(printf '%s' "$body" | jq -r '[.. | .message? // empty] | first // empty' 2>/dev/null)"
-  if [[ -n "$msg" ]]; then
-    printf '%s' "$msg"
-  else
-    printf '%s' "$body"
+  if [[ -z "$msg" ]]; then
+    msg="$body"
   fi
+  printf '%s' "$msg" | sed \
+    -e 's/--s3-secret-access-key="[^"]*"/--s3-secret-access-key="***REDACTED***"/g' \
+    -e 's/"secretAccessKey":"[^"]*"/"secretAccessKey":"***REDACTED***"/g'
 }
 
 # Abort with a helpful message for a failed Dokploy call.
@@ -932,8 +955,8 @@ dokploy_fail() {
 dokploy_test_connection() {
   local body="$1" resp status rbody
   resp="$(dokploy_api POST destination.testConnection "$body")"
-  status="${resp%%$'\n'*}"
-  rbody="${resp#*$'\n'}"
+  status="${resp##*$'\n'}"
+  rbody="${resp%$'\n'*}"
   if [[ "$status" == "200" || "$status" == "201" ]]; then
     return 0
   fi
@@ -948,8 +971,8 @@ dokploy_test_connection() {
 dokploy_create() {
   local body="$1" resp status rbody
   resp="$(dokploy_api POST destination.create "$body")"
-  status="${resp%%$'\n'*}"
-  rbody="${resp#*$'\n'}"
+  status="${resp##*$'\n'}"
+  rbody="${resp%$'\n'*}"
   if [[ "$status" == "200" || "$status" == "201" ]]; then
     return 0
   fi
@@ -960,8 +983,8 @@ dokploy_create() {
 dokploy_destination_exists() {
   local name="$1" resp status body
   resp="$(dokploy_api GET destination.all)"
-  status="${resp%%$'\n'*}"
-  body="${resp#*$'\n'}"
+  status="${resp##*$'\n'}"
+  body="${resp%$'\n'*}"
   if [[ "$status" != "200" && "$status" != "201" ]]; then
     dokploy_fail "destination list" "$status" "$body"
   fi
