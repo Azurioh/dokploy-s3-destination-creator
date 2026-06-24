@@ -956,6 +956,18 @@ dokploy_create() {
   dokploy_fail "destination create" "$status" "$rbody"
 }
 
+# Return 0 if a destination with the given name already exists in Dokploy.
+dokploy_destination_exists() {
+  local name="$1" resp status body
+  resp="$(dokploy_api GET destination.all)"
+  status="${resp%%$'\n'*}"
+  body="${resp#*$'\n'}"
+  if [[ "$status" != "200" && "$status" != "201" ]]; then
+    dokploy_fail "destination list" "$status" "$body"
+  fi
+  printf '%s' "$body" | jq -e --arg n "$name" 'any(.[]?; .name == $n)' >/dev/null 2>&1
+}
+
 # Orchestrate registration: preflight, resolve config, verify, then create.
 # Args: bucket region endpoint accessKey secretKey
 register_dokploy_destination() {
@@ -978,6 +990,11 @@ register_dokploy_destination() {
 
   if [[ "$DRY_RUN" == true ]]; then
     log "Dry-run: would register Dokploy destination '$name' at ${DOKPLOY_URL%/} (no API call made)."
+    return 0
+  fi
+
+  if dokploy_destination_exists "$name"; then
+    ok "Dokploy destination '$name' already exists; skipping."
     return 0
   fi
 
