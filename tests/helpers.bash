@@ -1,6 +1,24 @@
 #!/usr/bin/env bash
 # Shared bats helpers for the dokploy-s3 test suite.
 
+# Gating assertions. NOTE: bats does NOT fail a test on an intermediate
+# `[[ ... ]]` (it is a shell keyword, not a command), nor on a `!`-negated
+# command. These helpers are plain commands that return non-zero, so bats
+# reliably fails the test on any failed assertion, not just the last line.
+assert_contains() {  # haystack needle
+  case "$1" in
+    *"$2"*) return 0 ;;
+    *) echo "assert_contains failed: expected to contain '$2'" >&2; return 1 ;;
+  esac
+}
+
+assert_not_contains() {  # haystack needle
+  case "$1" in
+    *"$2"*) echo "assert_not_contains failed: unexpectedly contains '$2'" >&2; return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 # Absolute path to the script under test.
 SCRIPT="${BATS_TEST_DIRNAME}/../create-dokploy-s3-destination.sh"
 

@@ -28,9 +28,9 @@ teardown() { rm -rf "$STUBDIR"; }
 @test "register verifies the connection then creates the destination" {
   run bash -c "source '$SCRIPT'; DOKPLOY_URL=http://localhost:3000; DOKPLOY_API_KEY=K; register_dokploy_destination my-bucket eu-west-3 https://s3.eu-west-3.amazonaws.com AKIA secret"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"registered"* ]]
-  grep -q "destination.testConnection" "$CURL_LOG"
-  grep -q "destination.create" "$CURL_LOG"
+  assert_contains "$output" "registered"
+  assert_contains "$(cat "$CURL_LOG")" "destination.testConnection"
+  assert_contains "$(cat "$CURL_LOG")" "destination.create"
 }
 
 @test "register aborts and does NOT create when the connection test fails" {
@@ -39,6 +39,7 @@ teardown() { rm -rf "$STUBDIR"; }
 args="$*"
 printf '%s\n' "$args" >>"$CURL_LOG"
 case "$args" in
+  *destination.all*)            printf '[]\n200' ;;
   *destination.testConnection*) printf '{"message":"Error connecting to bucket"}\n400' ;;
   *)                            printf '{}\n200' ;;
 esac
@@ -46,14 +47,14 @@ EOF
   chmod +x "$STUBDIR/curl"
   run bash -c "source '$SCRIPT'; DOKPLOY_URL=http://localhost:3000; DOKPLOY_API_KEY=K; register_dokploy_destination my-bucket eu-west-3 https://s3.eu-west-3.amazonaws.com AKIA secret"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"Error connecting to bucket"* ]]
-  ! grep -q "destination.create" "$CURL_LOG"
+  assert_contains "$output" "Error connecting to bucket"
+  assert_not_contains "$(cat "$CURL_LOG")" "destination.create"
 }
 
 @test "register aborts when url/key cannot be resolved" {
   setup_config_home
   run bash -c "source '$SCRIPT'; unset DOKPLOY_URL DOKPLOY_API_KEY; register_dokploy_destination b eu-west-3 https://s3.eu-west-3.amazonaws.com k s"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"not configured"* ]]
+  assert_contains "$output" "not configured"
   teardown_config_home
 }

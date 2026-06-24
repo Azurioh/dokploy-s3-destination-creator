@@ -44,8 +44,8 @@ EOF
   write_profile prod "https://prod.example.com" "tok-prod"
   in_script 'read_profile prod'
   [ "$status" -eq 0 ]
-  printf '%s' "$output" | grep -q "https://prod.example.com"
-  printf '%s' "$output" | grep -q "tok-prod"
+  assert_contains "$output" "https://prod.example.com"
+  assert_contains "$output" "tok-prod"
 }
 
 @test "resolve uses the selected profile when no flag/env" {

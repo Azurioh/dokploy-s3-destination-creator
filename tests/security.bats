@@ -6,7 +6,7 @@ load helpers
 @test "warn_if_insecure_url warns for http on a non-local host" {
   in_script 'warn_if_insecure_url http://dokploy.example.com:3000'
   [ "$status" -eq 0 ]
-  [[ "$output" == *"not https"* ]]
+  assert_contains "$output" "not https"
 }
 
 @test "warn_if_insecure_url is silent for https" {

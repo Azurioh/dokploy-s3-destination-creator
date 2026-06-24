@@ -6,11 +6,11 @@ load helpers
 @test "--help exits 0 and prints usage" {
   run "$SCRIPT" --help
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Usage:"* ]]
+  assert_contains "$output" "Usage:"
 }
 
 @test "--version exits 0" {
   run "$SCRIPT" --version
   [ "$status" -eq 0 ]
-  [[ "$output" == *"create-dokploy-s3-destination"* ]]
+  assert_contains "$output" "create-dokploy-s3-destination"
 }

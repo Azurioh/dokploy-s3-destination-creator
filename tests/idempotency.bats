@@ -40,7 +40,7 @@ teardown() { [ -n "${STUBDIR:-}" ] && rm -rf "$STUBDIR"; }
   make_stub '[{"name":"my-bucket"}]'
   run bash -c "source '$SCRIPT'; DOKPLOY_URL=http://localhost:3000; DOKPLOY_API_KEY=K; register_dokploy_destination my-bucket eu-west-3 https://s3.eu-west-3.amazonaws.com AKIA secret"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"already exists"* ]]
-  ! grep -q "destination.create" "$CURL_LOG"
-  ! grep -q "destination.testConnection" "$CURL_LOG"
+  assert_contains "$output" "already exists"
+  assert_not_contains "$(cat "$CURL_LOG")" "destination.create"
+  assert_not_contains "$(cat "$CURL_LOG")" "destination.testConnection"
 }

@@ -989,7 +989,14 @@ register_dokploy_destination() {
   body="$(build_dokploy_body "$name" "$access_key" "$secret_key" "$bucket" "$region" "$endpoint")"
 
   if [[ "$DRY_RUN" == true ]]; then
-    log "Dry-run: would register Dokploy destination '$name' at ${DOKPLOY_URL%/} (no API call made)."
+    local base redacted
+    base="${DOKPLOY_URL%/}/api"
+    redacted="$(printf '%s' "$body" | jq '.secretAccessKey = "***REDACTED***"')"
+    log "Dry-run: no requests will be sent. Intended Dokploy calls (header 'x-api-key: ***REDACTED***'):"
+    printf 'POST %s/destination.all\n' "$base" >&2
+    printf 'POST %s/destination.testConnection\n' "$base" >&2
+    printf 'POST %s/destination.create\n' "$base" >&2
+    printf '%s\n' "$redacted" >&2
     return 0
   fi
 
