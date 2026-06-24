@@ -19,6 +19,15 @@ assert_not_contains() {  # haystack needle
   esac
 }
 
+# Octal permission bits of a file, portable across GNU stat (Linux/CI) and BSD
+# stat (macOS). GNU '-c' is tried first; BSD falls through to '-f'.
+file_mode() {  # path
+  if stat -c '%a' "$1" 2>/dev/null; then
+    return 0
+  fi
+  stat -f '%Lp' "$1"
+}
+
 # Absolute path to the script under test.
 SCRIPT="${BATS_TEST_DIRNAME}/../create-dokploy-s3-destination.sh"
 
