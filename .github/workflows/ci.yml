@@ -1,0 +1,36 @@
+name: CI
+
+# Verify the script is lint-clean and the bats test suite passes.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Lint & test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install shellcheck, bats and jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck bats jq
+
+      - name: Show tool versions
+        run: |
+          bash --version | head -1
+          shellcheck --version | grep version:
+          bats --version
+          jq --version
+
+      - name: Lint (shellcheck)
+        run: make lint
+
+      - name: Run tests (bats)
+        run: make test

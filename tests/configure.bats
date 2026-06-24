@@ -11,8 +11,8 @@ teardown() { teardown_config_home; }
   [ "$status" -eq 0 ]
   file="$XDG_CONFIG_HOME/dokploy-s3/profiles/prod.env"
   [ -f "$file" ]
-  [ "$(stat -f '%Lp' "$file")" = "600" ]
-  [ "$(stat -f '%Lp' "$XDG_CONFIG_HOME/dokploy-s3")" = "700" ]
+  [ "$(file_mode "$file")" = "600" ]
+  [ "$(file_mode "$XDG_CONFIG_HOME/dokploy-s3")" = "700" ]
   run bash -c "source '$SCRIPT'; read_profile prod"
   assert_contains "$output" "https://dok.example.com"
   assert_contains "$output" "tok-secret"
