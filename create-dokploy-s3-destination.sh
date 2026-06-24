@@ -31,6 +31,10 @@ readonly NAMESPACE_SUFFIX="an"     # required trailing label for account-regiona
 readonly DEFAULT_ENCRYPTION="AES256"
 readonly DEFAULT_OUTPUT="text"
 
+# Dokploy registration (opt-in) constants.
+readonly DOKPLOY_HTTP_TIMEOUT=15       # seconds per Dokploy API call
+readonly DEFAULT_DOKPLOY_PROFILE="default"
+
 STAGE=""
 PREFIX=""
 PROFILE=""
@@ -51,6 +55,14 @@ OUTPUT_FILE=""
 DRY_RUN=false
 QUIET=false
 NO_UPDATE_CHECK=false
+
+# Dokploy connection. DOKPLOY_URL / DOKPLOY_API_KEY may come from the
+# environment, so they are intentionally NOT initialized here (initializing
+# would clobber exported values); resolve_dokploy_config sets them after
+# applying precedence. OPT_* hold CLI-flag overrides (highest precedence).
+OPT_DOKPLOY_URL=""
+OPT_DOKPLOY_API_KEY=""
+DOKPLOY_PROFILE_NAME="$DEFAULT_DOKPLOY_PROFILE"
 
 # --- Logging ---------------------------------------------------------------
 
@@ -673,9 +685,172 @@ EOF
   esac
 }
 
-# --- Main ------------------------------------------------------------------
+# --- Dokploy: connection config --------------------------------------------
 
-main() {
+# Base directory for stored profiles (XDG-aware).
+config_dir() {
+  printf '%s/dokploy-s3' "${XDG_CONFIG_HOME:-$HOME/.config}"
+}
+
+# Path to a profile's env file. The name is used as a filename, so it must be
+# validated first.
+dokploy_profile_path() {
+  printf '%s/profiles/%s.env' "$(config_dir)" "$1"
+}
+
+# Reject names that are empty, contain path separators, or could traverse.
+validate_profile_name() {
+  local name="$1"
+  if [[ -z "$name" ]]; then
+    err "Profile name must not be empty"
+    return 1
+  fi
+  if [[ "$name" == *"/"* || "$name" == *".."* ]]; then
+    err "Invalid profile name '$name': must not contain '/' or '..'"
+    return 1
+  fi
+  if ! [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    err "Invalid profile name '$name': allowed characters are letters, digits, '.', '_' and '-'"
+    return 1
+  fi
+}
+
+# Extract a KEY=value from a profile file (last occurrence wins), stripping
+# optional surrounding double quotes. The file is parsed, never sourced, so a
+# profile cannot execute code.
+_profile_value() {
+  local file="$1" key="$2" line value
+  line="$(grep -E "^${key}=" "$file" | tail -n1)"
+  value="${line#*=}"
+  value="${value%\"}"
+  value="${value#\"}"
+  printf '%s' "$value"
+}
+
+# Print "<url>\n<key>" for a stored profile (both possibly empty); prints
+# nothing if the profile file does not exist.
+read_profile() {
+  local name="$1" path
+  path="$(dokploy_profile_path "$name")"
+  if [[ ! -f "$path" ]]; then
+    return 0
+  fi
+  printf '%s\n%s\n' \
+    "$(_profile_value "$path" DOKPLOY_URL)" \
+    "$(_profile_value "$path" DOKPLOY_API_KEY)"
+}
+
+# Given a profile and the current url/key, fill any empty value from the
+# profile. Echoes "<url>\n<key>". (No namerefs: must run on bash 3.2.)
+_merge_profile_into() {
+  local profile="$1" url="$2" key="$3"
+  local data
+  data="$(read_profile "$profile")"
+  local purl pkey
+  purl="${data%%$'\n'*}"
+  pkey="${data#*$'\n'}"
+  pkey="${pkey%%$'\n'*}"
+  if [[ "$pkey" == "$data" ]]; then
+    pkey=""
+  fi
+  if [[ -z "$url" ]]; then
+    url="$purl"
+  fi
+  if [[ -z "$key" ]]; then
+    key="$pkey"
+  fi
+  printf '%s\n%s' "$url" "$key"
+}
+
+# Resolve DOKPLOY_URL and DOKPLOY_API_KEY using precedence:
+#   CLI flag > environment > selected profile > default profile.
+resolve_dokploy_config() {
+  local url="$OPT_DOKPLOY_URL" key="$OPT_DOKPLOY_API_KEY"
+
+  if [[ -z "$url" ]]; then
+    url="${DOKPLOY_URL:-}"
+  fi
+  if [[ -z "$key" ]]; then
+    key="${DOKPLOY_API_KEY:-}"
+  fi
+
+  if [[ -z "$url" || -z "$key" ]]; then
+    local merged
+    merged="$(_merge_profile_into "$DOKPLOY_PROFILE_NAME" "$url" "$key")"
+    url="${merged%%$'\n'*}"
+    key="${merged#*$'\n'}"
+  fi
+  if [[ ( -z "$url" || -z "$key" ) && "$DOKPLOY_PROFILE_NAME" != "$DEFAULT_DOKPLOY_PROFILE" ]]; then
+    local merged
+    merged="$(_merge_profile_into "$DEFAULT_DOKPLOY_PROFILE" "$url" "$key")"
+    url="${merged%%$'\n'*}"
+    key="${merged#*$'\n'}"
+  fi
+
+  DOKPLOY_URL="$url"
+  DOKPLOY_API_KEY="$key"
+}
+
+# --- Dokploy: HTTP ---------------------------------------------------------
+
+# curl + jq are only needed on the registration path; fail early and clearly.
+require_dokploy_tools() {
+  local missing=()
+  if ! command -v curl >/dev/null 2>&1; then
+    missing+=("curl")
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    missing+=("jq")
+  fi
+  if (( ${#missing[@]} > 0 )); then
+    err "Dokploy registration needs: ${missing[*]}. Install them and retry (only required with --register-dokploy)."
+    exit 1
+  fi
+}
+
+# Warn when the API key + secret would travel unencrypted.
+warn_if_insecure_url() {
+  local url="$1"
+  case "$url" in
+    https://*) return 0 ;;
+    http://localhost|http://localhost:*|http://localhost/*) return 0 ;;
+    http://127.0.0.1|http://127.0.0.1:*|http://127.0.0.1/*) return 0 ;;
+    http://*)
+      warn "Dokploy URL '$url' is not https; the API key and secret will be sent unencrypted."
+      return 0
+      ;;
+    *) return 0 ;;
+  esac
+}
+
+# Perform a Dokploy API call. Echoes "<http_status>\n<body>"; a transport
+# failure (e.g. host unreachable) yields status 000. Reads the resolved
+# DOKPLOY_URL / DOKPLOY_API_KEY.
+dokploy_api() {
+  local method="$1" route="$2" body="${3:-}"
+  local url="${DOKPLOY_URL%/}/api/${route}"
+  local curl_args=(
+    --silent --show-error --max-time "$DOKPLOY_HTTP_TIMEOUT"
+    -H "x-api-key: ${DOKPLOY_API_KEY}"
+    -X "$method"
+    -o - -w $'\n%{http_code}'
+  )
+  if [[ -n "$body" ]]; then
+    curl_args+=(-H "Content-Type: application/json" --data "$body")
+  fi
+  local response
+  if ! response="$(curl "${curl_args[@]}" "$url" 2>/dev/null)"; then
+    printf '000\n'
+    return 0
+  fi
+  local status_code="${response##*$'\n'}"
+  local response_body="${response%$'\n'*}"
+  printf '%s\n%s' "$status_code" "$response_body"
+}
+
+# --- Subcommands -----------------------------------------------------------
+
+cmd_create() {
   parse_args "$@"
   validate_args
   maybe_check_update
@@ -733,6 +908,26 @@ main() {
   if [[ "$DRY_RUN" != true ]]; then
     warn "The secret access key is shown only once. Store it securely now."
   fi
+}
+
+# --- Main ------------------------------------------------------------------
+
+# Dispatch on the optional leading subcommand. A bare invocation (no
+# subcommand) defaults to `create`, preserving the original CLI.
+main() {
+  case "${1:-}" in
+    configure)
+      shift
+      cmd_configure "$@"
+      ;;
+    create)
+      shift
+      cmd_create "$@"
+      ;;
+    *)
+      cmd_create "$@"
+      ;;
+  esac
 }
 
 # Only run when executed directly, not when sourced (e.g. by the test suite).
