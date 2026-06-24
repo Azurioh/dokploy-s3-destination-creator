@@ -318,6 +318,8 @@ The API key is read without echo and saved to `${XDG_CONFIG_HOME:-$HOME/.config}
 
 Add `--dry-run` to preview the exact API calls (the secret and API key are shown as `***REDACTED***`) without sending anything.
 
+When registration succeeds, the S3 destination block (including the secret key) is **not** printed to the terminal — Dokploy now holds the credentials. If registration fails, the credentials are printed so the once-only AWS secret is never lost. Pass `--output-file <path>` to also save them to a mode-`600` file regardless.
+
 Connection settings resolve in this order: **`--dokploy-url` flag → `DOKPLOY_URL` / `DOKPLOY_API_KEY` env → selected `--dokploy-profile` → `default` profile**. On Dokploy Cloud, also pass `--server-id <id>`. By default the destination is named after the bucket; override with `--destination-name`.
 
 > `curl` and `jq` are required for this path only. The destination's `endpoint` is set to `https://s3.<region>.amazonaws.com` (no bucket in the host) to avoid a known Dokploy endpoint-handling issue.

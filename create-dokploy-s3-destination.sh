@@ -35,6 +35,11 @@ readonly DEFAULT_OUTPUT="text"
 readonly DOKPLOY_PROVIDER="AWS"        # rclone --s3-provider value Dokploy expects for AWS S3
 readonly DOKPLOY_HTTP_TIMEOUT=15       # seconds per Dokploy API call
 readonly DEFAULT_DOKPLOY_PROFILE="default"
+# A just-created IAM access key is eventually consistent across AWS, so the first
+# connection test can fail with InvalidAccessKeyId before the key propagates.
+# Retry that specific case with linear backoff (3s+6s+9s+12s ≈ 30s total).
+readonly DOKPLOY_TEST_MAX_ATTEMPTS=5
+readonly DOKPLOY_TEST_RETRY_BASE_DELAY=3   # seconds; multiplied by the attempt number
 
 STAGE=""
 PREFIX=""
@@ -951,20 +956,29 @@ dokploy_fail() {
 }
 
 # Verify the credentials reach the bucket (rclone ls under the hood). Aborts on
-# failure so we never create a destination that does not work.
+# failure so we never create a destination that does not work. A freshly-created
+# IAM access key reads as InvalidAccessKeyId until it propagates across AWS, so
+# that one case is retried with backoff before giving up.
 dokploy_test_connection() {
-  local body="$1" resp status rbody
-  resp="$(dokploy_api POST destination.testConnection "$body")"
-  status="${resp##*$'\n'}"
-  rbody="${resp%$'\n'*}"
-  if [[ "$status" == "200" || "$status" == "201" ]]; then
-    return 0
-  fi
-  if [[ "$status" == "404" && "$rbody" == *"Server not found"* ]]; then
-    err "Dokploy connection test failed: server not found. On Dokploy Cloud you must pass --server-id <id>."
-    exit 1
-  fi
-  dokploy_fail "connection test" "$status" "$rbody"
+  local body="$1" resp status rbody delay attempt
+  for (( attempt = 1; attempt <= DOKPLOY_TEST_MAX_ATTEMPTS; attempt++ )); do
+    resp="$(dokploy_api POST destination.testConnection "$body")"
+    status="${resp##*$'\n'}"
+    rbody="${resp%$'\n'*}"
+    if [[ "$status" == "200" || "$status" == "201" ]]; then
+      return 0
+    fi
+    if [[ "$status" == "404" && "$rbody" == *"Server not found"* ]]; then
+      err "Dokploy connection test failed: server not found. On Dokploy Cloud you must pass --server-id <id>."
+      exit 1
+    fi
+    if [[ "$rbody" != *InvalidAccessKeyId* || "$attempt" -eq "$DOKPLOY_TEST_MAX_ATTEMPTS" ]]; then
+      dokploy_fail "connection test" "$status" "$rbody"
+    fi
+    delay=$(( attempt * DOKPLOY_TEST_RETRY_BASE_DELAY ))
+    warn "Access key not yet active across AWS (attempt ${attempt}/${DOKPLOY_TEST_MAX_ATTEMPTS}); retrying in ${delay}s..."
+    sleep "$delay"
+  done
 }
 
 # Create the destination in Dokploy.
@@ -1081,8 +1095,9 @@ cmd_create() {
 
   local rendered
   rendered=$(render_output "$bucket" "$REGION" "$endpoint" "$access_key" "$secret_key")
-  printf '%s\n' "$rendered"
 
+  # Persist to the output file when requested, independent of how we register:
+  # an explicit --output-file is a save request the user always wants honored.
   if [[ -n "$OUTPUT_FILE" ]]; then
     local prev_umask
     prev_umask=$(umask)
@@ -1092,14 +1107,22 @@ cmd_create() {
     ok "Result written to $OUTPUT_FILE (mode 600)"
   fi
 
-  # Register in Dokploy after the credentials are shown, so a registration
-  # failure never loses the provisioned credentials.
   if [[ "$REGISTER_DOKPLOY" == true ]]; then
-    register_dokploy_destination "$bucket" "$REGION" "$endpoint" "$access_key" "$secret_key"
-  fi
-
-  if [[ "$DRY_RUN" != true ]]; then
-    warn "The secret access key is shown only once. Store it securely now."
+    # Registering hands the credentials to Dokploy, so we keep the S3 destination
+    # block off the terminal. The subshell traps register's exit-on-failure: only
+    # when it fails do we reveal the credentials, so the once-only secret is
+    # never lost.
+    if ! ( register_dokploy_destination "$bucket" "$REGION" "$endpoint" "$access_key" "$secret_key" ); then
+      warn "Dokploy registration failed — showing the credentials so the once-only secret is not lost:"
+      printf '%s\n' "$rendered"
+      warn "The secret access key is shown only once. Store it securely now."
+      exit 1
+    fi
+  else
+    printf '%s\n' "$rendered"
+    if [[ "$DRY_RUN" != true ]]; then
+      warn "The secret access key is shown only once. Store it securely now."
+    fi
   fi
 }
 
