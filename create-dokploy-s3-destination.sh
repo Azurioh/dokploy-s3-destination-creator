@@ -20,7 +20,7 @@ set -euo pipefail
 
 # --- Defaults --------------------------------------------------------------
 
-readonly VERSION="1.0.0"
+readonly VERSION="1.1.0"
 readonly REPO="Azurioh/dokploy-s3-destination-creator"
 readonly REMOTE_SCRIPT="create-dokploy-s3-destination.sh"
 readonly UPDATE_REF="main"             # branch/tag the update check compares against
@@ -993,7 +993,7 @@ register_dokploy_destination() {
     base="${DOKPLOY_URL%/}/api"
     redacted="$(printf '%s' "$body" | jq '.secretAccessKey = "***REDACTED***"')"
     log "Dry-run: no requests will be sent. Intended Dokploy calls (header 'x-api-key: ***REDACTED***'):"
-    printf 'POST %s/destination.all\n' "$base" >&2
+    printf 'GET  %s/destination.all\n' "$base" >&2
     printf 'POST %s/destination.testConnection\n' "$base" >&2
     printf 'POST %s/destination.create\n' "$base" >&2
     printf '%s\n' "$redacted" >&2

@@ -26,7 +26,7 @@ uninstall:
 	@echo "Removed $(DESTDIR)$(BINDIR)/$(BIN)"
 
 lint:
-	shellcheck "$(SCRIPT)"
+	shellcheck "$(SCRIPT)" install.sh
 
 test:
 	@if ! command -v bats >/dev/null 2>&1; then \

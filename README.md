@@ -44,8 +44,9 @@ Setting up an S3 destination by hand means juggling bucket naming rules, a least
 | --- | --- |
 | [AWS CLI v2](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) | Configured with a profile that has the [permissions below](#iam-permissions-for-the-operator). |
 | `bash` ≥ 4 | The script uses arrays and modern Bash features. |
+| `curl` + `jq` | **Only** for the optional Dokploy registration path (`--register-dokploy` / `configure`). Not needed for plain provisioning. |
 
-No other dependencies — output parsing uses the AWS CLI's own `--query`/`--output`, so `jq` is **not** required.
+The default provisioning path needs nothing beyond the AWS CLI — output parsing uses the AWS CLI's own `--query`/`--output`, so `jq` is **not** required there.
 
 > **Account-regional namespace** is an AWS feature released in March 2026. If your account or region does not support it yet, pass `--namespace global` to fall back to the classic global namespace.
 
@@ -148,6 +149,10 @@ Output:
 
 ## Options
 
+The tool has two subcommands: **`create`** (provision a bucket, the default when no
+subcommand is given — so existing usage keeps working) and **`configure`** (store a
+Dokploy connection profile). The `create` flags below also accept a leading `create`.
+
 | Flag | Default | Description |
 | --- | --- | --- |
 | `--stage <name>` | *(required)* | Deployment stage (e.g. `prod`, `staging`, `dev`). |
@@ -172,6 +177,21 @@ Output:
 | `--no-update-check` | — | Skip the startup check for a newer version. |
 | `-v`, `--version` | — | Print the version and exit. |
 | `-h`, `--help` | — | Show usage. |
+
+### Dokploy registration flags (opt-in)
+
+Require `curl` + `jq`. See [Using it with Dokploy](#using-it-with-dokploy).
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--register-dokploy` | *(off)* | After provisioning, register the bucket as a Dokploy S3 destination (connection verified first). |
+| `--dokploy-url <url>` | — | Dokploy base URL (e.g. `https://dokploy.example.com`). |
+| `--dokploy-profile <name>` | `default` | Stored connection profile to use. **Distinct from `--profile` (AWS).** |
+| `--dokploy-api-key <key>` | — | API key (discouraged: visible in the process list; prefer `configure` or `DOKPLOY_API_KEY`). |
+| `--server-id <id>` | — | Dokploy server id (required by Dokploy Cloud). |
+| `--destination-name <name>` | *bucket name* | Name of the destination in Dokploy (idempotency key). |
+
+The `configure` subcommand takes only `--dokploy-profile <name>` (and `-h`).
 
 ### Examples
 
@@ -273,15 +293,46 @@ The IAM user receives an inline policy scoped to the new bucket and nothing else
 
 ## Using it with Dokploy
 
-1. Run the script and keep the output handy.
-2. In Dokploy, go to **Settings → S3 Destinations → Add Destination**.
-3. Fill in the fields from the output:
-   - **Bucket** → `Bucket name`
-   - **Region** → `Region`
-   - **Endpoint** → `Endpoint`
-   - **Access Key** → `Access Key ID`
-   - **Secret Key** → `Secret Access Key`
-4. Save and run a test backup.
+You have two options: let the script register the destination for you, or copy the values in by hand.
+
+### Automatic registration (recommended)
+
+The script can create the destination in Dokploy directly via its API, so you never touch the UI. It verifies the connection first and skips creation if a destination with the same name already exists (safe to re-run).
+
+**1. Store your Dokploy connection once** (per account/instance):
+
+```bash
+./create-dokploy-s3-destination.sh configure --dokploy-profile prod
+# prompts for the Dokploy URL and an API key (input hidden)
+```
+
+The API key is read without echo and saved to `${XDG_CONFIG_HOME:-$HOME/.config}/dokploy-s3/profiles/prod.env` (file mode `600`). Create a token in Dokploy under **Settings → API/CLI** (`/settings/profile`).
+
+**2. Provision and register in one command:**
+
+```bash
+./create-dokploy-s3-destination.sh \
+  --stage prod --prefix passbolt-backups --profile my-aws-profile \
+  --register-dokploy --dokploy-profile prod
+```
+
+Add `--dry-run` to preview the exact API calls (the secret and API key are shown as `***REDACTED***`) without sending anything.
+
+Connection settings resolve in this order: **`--dokploy-url` flag → `DOKPLOY_URL` / `DOKPLOY_API_KEY` env → selected `--dokploy-profile` → `default` profile**. On Dokploy Cloud, also pass `--server-id <id>`. By default the destination is named after the bucket; override with `--destination-name`.
+
+> `curl` and `jq` are required for this path only. The destination's `endpoint` is set to `https://s3.<region>.amazonaws.com` (no bucket in the host) to avoid a known Dokploy endpoint-handling issue.
+
+### Manual registration
+
+If you prefer not to grant API access, run the script without `--register-dokploy`, then in Dokploy go to **Settings → S3 Destinations → Add Destination** and fill in the fields from the output:
+
+- **Bucket** → `Bucket name`
+- **Region** → `Region`
+- **Endpoint** → `Endpoint`
+- **Access Key** → `Access Key ID`
+- **Secret Key** → `Secret Access Key`
+
+Save and run a test backup.
 
 ## IAM permissions for the operator
 
