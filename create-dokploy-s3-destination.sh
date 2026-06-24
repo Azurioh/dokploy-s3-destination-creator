@@ -1056,6 +1056,72 @@ cmd_create() {
   fi
 }
 
+configure_usage() {
+  cat >&2 <<EOF
+Store a Dokploy connection profile (URL + API key) for reuse with --register-dokploy.
+
+Usage: $0 configure [--dokploy-profile <name>]
+
+Options:
+  --dokploy-profile <name>  Profile name to write (default: ${DEFAULT_DOKPLOY_PROFILE})
+  -h, --help                Show this help
+
+You will be prompted for the Dokploy URL and API key. The key is read without
+echo and stored in ${XDG_CONFIG_HOME:-\$HOME/.config}/dokploy-s3/profiles/<name>.env
+(file mode 600). Create a token in Dokploy under Settings -> /settings/profile.
+EOF
+}
+
+cmd_configure() {
+  local profile="$DEFAULT_DOKPLOY_PROFILE"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dokploy-profile) profile="${2:-}"; shift 2 ;;
+      -h|--help)         configure_usage; exit 0 ;;
+      *)                 err "Unknown argument: $1"; configure_usage; exit 1 ;;
+    esac
+  done
+
+  if ! validate_profile_name "$profile"; then
+    exit 1
+  fi
+
+  local url key
+  printf 'Dokploy URL: ' >&2
+  read -r url
+  printf 'Dokploy API key (input hidden): ' >&2
+  read -rs key
+  printf '\n' >&2
+
+  if [[ -z "$url" || -z "$key" ]]; then
+    err "Both the Dokploy URL and API key are required."
+    exit 1
+  fi
+
+  local dir path
+  dir="$(config_dir)/profiles"
+  path="$(dokploy_profile_path "$profile")"
+
+  local prev_umask
+  prev_umask=$(umask)
+  umask 077
+  mkdir -p "$dir"
+  cat > "$path" <<EOF
+DOKPLOY_URL="$url"
+DOKPLOY_API_KEY="$key"
+EOF
+  umask "$prev_umask"
+
+  if ! chmod 700 "$(config_dir)" "$dir"; then
+    warn "Could not tighten permissions on $dir"
+  fi
+  if ! chmod 600 "$path"; then
+    warn "Could not tighten permissions on $path"
+  fi
+
+  ok "Saved Dokploy profile '$profile' to $path"
+}
+
 # --- Main ------------------------------------------------------------------
 
 # Dispatch on the optional leading subcommand. A bare invocation (no
