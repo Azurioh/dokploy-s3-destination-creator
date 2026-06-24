@@ -52,8 +52,11 @@ and any token **redacted**; performs no network call (FR-014).
 
 ## Ordering within `create --register-dokploy`
 
-Provision (unchanged) → render/print credentials (unchanged, so they are never lost — FR/Edge
-"partial failure") → `require_dokploy_tools` → resolve config → idempotency check
-(`GET destination.all`, skip if name exists) → `testConnection` (fail-fast) → `create` →
-success summary. Any Dokploy-side failure exits non-zero after the credentials have already been
-shown.
+Provision (unchanged) → write `--output-file` if requested → `require_dokploy_tools` → resolve
+config → idempotency check (`GET destination.all`, skip if name exists) → `testConnection`
+(retried while the new IAM key is still propagating, then fail-fast) → `create` → success summary.
+
+The S3 destination block (including the secret key) is **not** printed to the terminal when
+registration succeeds: Dokploy now holds the credentials. To guarantee the once-only secret is
+never lost on a partial failure, any Dokploy-side failure prints the credentials before exiting
+non-zero. Without `--register-dokploy`, the block is always printed as before.
